@@ -6,6 +6,7 @@ import krpc
 
 import krpclogstream
 import pid
+from decorators import log_as
 from vector import Vector
 
 # Configurable Features
@@ -30,12 +31,13 @@ vessel = ksc.active_vessel
 SASMode = ksc.SASMode
 
 # Configure logging
-ksp_stream = krpclogstream.KrpcLogStream(conn)
 logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
-handler = logging.StreamHandler(ksp_stream)
 logger = logging.getLogger(__name__)
-logger.addHandler(handler)
 logger.setLevel(logging.INFO)
+if FEATURES["SHOW_LOG_IN_KSP"]:
+    ksp_stream = krpclogstream.KrpcLogStream(conn)
+    handler = logging.StreamHandler(ksp_stream)
+    logger.addHandler(handler)
 
 
 def show_features():
@@ -85,12 +87,11 @@ def do_prelaunch():
     vessel.control.throttle = 1.0
 
 
-def do_launch(seconds, heading=90):
-    """Launch the rocket after `seconds` countdown, pointing in `heading` direction
+def do_launch(seconds):
+    """Launch the rocket after `seconds` countdown, pointing straight up
 
     Parameters:
     `seconds`: Time until launch in seconds
-    `heading`: The direction to take off in
     """
 
     # Countdown...
@@ -98,7 +99,7 @@ def do_launch(seconds, heading=90):
 
     # Activate the first stage
     vessel.auto_pilot.engage()
-    vessel.auto_pilot.target_pitch_and_heading(90, heading)
+    vessel.auto_pilot.target_pitch_and_heading(90, 90)
     # Stage until the rocket gets some thrust
     while vessel.thrust < 10:
         vessel.control.activate_next_stage()
@@ -122,9 +123,13 @@ def do_ascent(target_altitude=100000, target_heading=90):
     else:
         vessel.auto_pilot.target_roll = 90
 
-    with conn.stream(vessel.orbit, "apoapsis_altitude") as apoapsis, conn.stream(
-        vessel.flight(), "surface_altitude"
-    ) as altitude, conn.stream(vessel.orbit, "time_to_apoapsis") as time_to_apoapsis:
+    with conn.stream(
+        getattr, vessel.orbit, "apoapsis_altitude"
+    ) as apoapsis, conn.stream(
+        getattr, vessel.flight(), "surface_altitude"
+    ) as altitude, conn.stream(
+        getattr, vessel.orbit, "time_to_apoapsis"
+    ) as time_to_apoapsis:
 
         while apoapsis() < target_altitude * 0.95:
 
@@ -168,14 +173,15 @@ def do_coast(altitude):
 
     # Until we exit the planets atmosphere
     atmosphere_depth = vessel.orbit.body.atmosphere_depth
-    with conn.stream(vessel.flight(), "mean_altitude") as altitude:
-        with conn.stream(vessel.orbit, "apoapsis_altitude") as apoapsis:
-            while altitude() < atmosphere_depth:
-                vessel.control.throttle = limit(
-                    vessel.control.throttle + coast_pid.update(apoapsis())
-                )
-                auto_stage
-                time.sleep(0.1)
+    with conn.stream(
+        getattr, vessel.flight(), "mean_altitude"
+    ) as altitude, conn.stream(getattr, vessel.orbit, "apoapsis_altitude") as apoapsis:
+        while altitude() < atmosphere_depth:
+            vessel.control.throttle = limit(
+                vessel.control.throttle + coast_pid.update(apoapsis())
+            )
+            auto_stage
+            time.sleep(0.1)
 
 
 def set_sas_mode(new_mode):
@@ -211,6 +217,7 @@ def show_orbit():
     logger.info(s)
 
 
+# @log_as(logger, logging.DEBUG)
 def hill_climb(data, score_function):
     """Modify the list of data and use the score_function to improve it
 
@@ -220,10 +227,10 @@ def hill_climb(data, score_function):
     """
     current_score = score_function(data)
     current_best = data.copy()
-    for step in [100, 10, 1, 0.1]:
+    for step in [100, 10, 1, 0.1, 0.01, 0.001, 0.0001]:
         improved = True
         while improved:
-            # Create a list of candidate data lists with each elements adjusted by +-step
+            # Create a list of candidate data lists with each elements adjusted by +/-step
             candidates = []
             for c in range(0, len(data)):
                 inc = current_best.copy()
@@ -239,6 +246,8 @@ def hill_climb(data, score_function):
                     current_score = score
                     current_best = c
                     improved = True
+        logger.debug(f"Hill Climb Results: Step={step}, Score={current_score}")
+    logger.debug(f"Hill Climb: Best Score={current_score}, Result={current_best}")
     return current_best
 
 
@@ -251,7 +260,7 @@ def score_eccenticity(data):
     `data`: list with single item - prograde deltaV burn
     """
     node = vessel.control.add_node(
-        ksc.ut() + vessel.orbit.time_to_apoapsis, prograde=data[0]
+        ksc.ut + vessel.orbit.time_to_apoapsis, prograde=data[0]
     )
     score = node.orbit.eccentricity
     node.remove()
@@ -268,6 +277,89 @@ def calculate_burn_time(node):
     return (m0 - m1) / flow_rate
 
 
+def align_with_node(node):
+    """Align the ship with the burn vector of the node
+
+    Parameters:
+    `node`: The node to align with
+    """
+    logger.info("Orientating ship for burn")
+    if FEATURES["USE_SAS"]:
+        vessel.auto_pilot.disengage()
+        if set_sas_mode(SASMode.maneuver):
+            logger.info("Using SAS")
+            pointing_at_node = False
+            n = Vector(0, 1, 0)
+            with conn.stream(
+                getattr, vessel.flight(node.reference_frame), "direction"
+            ) as facing:
+                while not pointing_at_node:
+                    d = Vector(facing())
+                    if d.angle(n) < 2:
+                        pointing_at_node = True
+                    time.sleep(0.1)
+            logger.info("Returning to Auto Pilot")
+        else:
+            logger.info("Using auto pilot")
+
+    vessel.auto_pilot.sas = False
+    vessel.auto_pilot.reference_frame = node.reference_frame
+    vessel.auto_pilot.target_direction = (0, 1, 0)
+    vessel.auto_pilot.engage()
+    vessel.auto_pilot.wait()
+
+
+def wait_until_time(ut_time, use_warp=True):
+    """Wait until it is specified absolute time
+
+    Parameters:
+    `ut_time`: Absolute universal time in seconds to wait until
+    """
+    logger.info("Waiting until time")
+    if use_warp:
+        lead_time = 5
+        ksc.warp_to(ut_time - lead_time)
+    # Wait for the last few seconds
+    while ksc.ut - ut_time > 0:
+        pass
+
+
+def execute_burn(node):
+    """Execute the burn defined by the node, assume the craft is already aligned for the burn
+
+    Parameters:
+    `node`: Node defining the deltaV needed for the burn
+    """
+    logger.info("Executing burn")
+
+    with conn.stream(getattr, node, "remaining_delta_v") as remaining_delta_v:
+        dv = remaining_delta_v()
+        last_dv = dv
+        while dv > 0.01:
+            engine_dv = vessel.available_thrust / vessel.mass
+            vessel.control.throttle = max(min((dv / engine_dv), 1), 0.01)
+            last_dv = dv
+            dv = remaining_delta_v()
+            if dv > last_dv + 0.01:
+                break
+    vessel.control.throttle = 0.0
+
+
+def execute_next_node():
+    """Execute the next node and then remove it from the plan"""
+    if len(vessel.control.nodes) > 0:
+        node = vessel.control.nodes[0]
+
+        burn_time = calculate_burn_time(node)
+        align_with_node(node)
+        wait_until_time(node.ut - (burn_time / 2))
+        execute_burn(node)
+
+        node.remove()
+    else:
+        logger.error("execute_next_node: No Node to execute")
+
+
 ###################################################
 #
 # Go to space
@@ -276,70 +368,19 @@ def calculate_burn_time(node):
 
 show_features()
 do_prelaunch()
-do_launch(5, TARGET_HEADING)
+do_launch(5)
 do_ascent(TARGET_ALTITUDE, TARGET_HEADING)
 do_coast(TARGET_ALTITUDE)
 
-delta_v = hill_climb([0], score_eccenticity)
-# Create the circularisation node at apoapsis
-node = vessel.control.add_node(
-    ksc.ut() + vessel.orbit.time_to_apoapsis, prograde=delta_v
-)
-burn_time = calculate_burn_time(node)
-
-# Orientate ship
-logger.info("Orientating ship for circularization burn")
-if FEATURES["USE_SAS"]:
-    vessel.auto_pilot.disengage()
-    if set_sas_mode(SASMode.maneuver):
-        logger.info("Using SAS")
-        pointing_at_node = False
-        n = Vector(0, 1, 0)
-        with conn.stream(vessel.flight(node.reference_frame), "direction") as facing:
-            while not pointing_at_node:
-                d = Vector(facing())
-                if d.angle(n) < 2:
-                    pointing_at_node = True
-                time.sleep(0.1)
-        logger.info("Returning to Auto Pilot")
-    else:
-        logger.info("Using auto pilot")
-
-vessel.auto_pilot.sas = False
-vessel.auto_pilot.reference_frame = node.reference_frame
-vessel.auto_pilot.target_direction = (0, 1, 0)
-vessel.auto_pilot.engage()
-vessel.auto_pilot.wait()
-
-# Wait until burn
-logger.info("Waiting until circularization burn")
-burn_ut = ksc.ut() + vessel.orbit.time_to_apoapsis - (burn_time / 2.0)
-lead_time = 5
-ksc.warp_to(burn_ut - lead_time)
-
-# Execute burn
-with conn.stream(vessel.orbit, "time_to_apoapsis") as time_to_apoapsis:
-    while time_to_apoapsis() - (burn_time / 2.0) > 0:
-        pass
-logger.info("Executing burn")
-
-with conn.stream(node, "remaining_delta_v") as remaining_delta_v:
-    dv = remaining_delta_v()  # prograde only
-    last_dv = dv
-    while dv > 0.01:
-        engine_dv = vessel.available_thrust / vessel.mass
-        vessel.control.throttle = max(min((dv / engine_dv), 1), 0.01)
-        last_dv = dv
-        dv = remaining_delta_v()
-        if dv > last_dv + 0.01:
-            break
-
-vessel.control.throttle = 0.0
-node.remove()
+# Work out the circularization burn, only need to adjust the prograde burn as it will
+# always be at the apoapsis
+delta_v = hill_climb([0], score_eccenticity)[0]
+node = vessel.control.add_node(ksc.ut + vessel.orbit.time_to_apoapsis, prograde=delta_v)
+execute_next_node()
 
 logger.info("Launch complete")
 
 time.sleep(10)
 show_orbit()
 
-logger.critical("PROGRAM ENDED")
+logger.info("PROGRAM ENDED")

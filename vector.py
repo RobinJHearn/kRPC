@@ -5,15 +5,14 @@ class Vector(object):
     """Class to hold a directional vector for use with kRPC
 
     The vector is always a 3 element vector representing a direction in space
-
-     """
+    """
 
     def __init__(self, *args):
         """Initialise the vector with the three dimensional values
 
         Parameters:
             `values`: iterable containing 3 or more numbers, only the first 3 values are
-                    used one each of the three spatial dimensions
+                    used one for each of the three spatial dimensions
         """
         values = []
         if args == None:
@@ -31,17 +30,17 @@ class Vector(object):
 
     def __str__(self):
         """Display the vector as a list"""
-        #        return f"[{self.vector[0]}, {self.vector[1]}, {self.vector[2]}]"
         return self.vector.__str__()
 
     def __iter__(self):
+        """Allow the vector to be iterated over to extract each element"""
         i = 0
         while i < 3:
             yield self.vector[i]
             i += 1
 
     def mag(self):
-        """Return the magnitude of the passed in vector    """
+        """Return the magnitude of the passed in vector"""
         return math.sqrt(sum([x ** 2 for x in self.vector]))
 
     def dot(self, other):
