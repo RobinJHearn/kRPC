@@ -6,6 +6,9 @@ import krpc
 import time
 import logging
 
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler)
+
 
 class KrpcLogStream(object):
     """Class to write log messages to a windows in KSP
@@ -52,11 +55,6 @@ class KrpcLogStream(object):
 
 
 if __name__ == "__main__":
-
-    logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
-    logger = logging.getLogger(__name__)
-    logger.setLevel(logging.INFO)
-
     stream = KrpcLogStream(krpc.connect(name="Test Logger Stream"))
     stream.write("Hello World")
     time.sleep(3)

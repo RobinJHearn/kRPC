@@ -1,4 +1,8 @@
 import math
+import logging
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler)
 
 
 class Vector(object):
