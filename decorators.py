@@ -5,37 +5,46 @@ import logging
 import functools
 
 
-class log_as(object):
+def log_as(logger, level):
     """Decorator to set the logging level for a function then return it to the original value"""
 
-    def __init__(self, logger, level):
-        """Arguments must be passed as that is what this is for
-
-        Parameters:
-        `logger`: The logging object to set the level of
-        `level`: The logging level to set
-        """
-        self.logger = logger
-        self.level = level
-
-    def __call__(self, func):
-        """Returns a wrapper the wraps func.
-        The wrapper will store the current log level then set it to the specified value
-        """
+    def decorator(func):
+        """The actual decorator function"""
 
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
-            """Wrapper function
-
-                Store logging level
-                Set required level
-                Call original function
-                Restore logging level
-            """
-            level = self.logger.level
-            self.logger.setLevel(self.level)
+            """Wrapper to temporarily change the logging level"""
+            current_level = logger.level
+            logger.setLevel(level)
             f_result = func(*args, **kwargs)
-            self.logger.setLevel(level)
+            logger.setLevel(current_level)
             return f_result
 
         return wrapper
+
+    return decorator
+
+
+def log_critical(logger):
+    """Set the logger level to critical for the decorated function"""
+    return log_as(logger, logging.CRITICAL)
+
+
+def log_error(logger):
+    """Set the logger level to error for the decorated function"""
+    return log_as(logger, logging.ERROR)
+
+
+def log_warning(logger):
+    """Set the logger level to warning for the decorated function"""
+    return log_as(logger, logging.WARNING)
+
+
+def log_info(logger):
+    """Set the logger level to info for the decorated function"""
+    return log_as(logger, logging.INFO)
+
+
+def log_debug(logger):
+    """Set the logger level to debug for the decorated function"""
+    return log_as(logger, logging.DEBUG)

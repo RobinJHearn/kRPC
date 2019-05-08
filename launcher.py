@@ -6,7 +6,7 @@ import krpc
 
 import krpclogstream
 import pid
-from decorators import log_as
+from decorators import log_as, log_debug
 from vector import Vector
 
 # Configurable Features
@@ -18,7 +18,7 @@ FEATURES = {
 }
 
 # Launch parameters
-TARGET_ALTITUDE = 100000
+TARGET_ALTITUDE = 100_000
 TARGET_HEADING = 90
 
 # Universal Constants
@@ -62,8 +62,11 @@ def auto_stage():
     if not hasattr(auto_stage, "available_thrust"):
         auto_stage.available_thrust = vessel.available_thrust - 10
     if vessel.available_thrust < auto_stage.available_thrust:
-        vessel.control.activate_next_stage()
-        logger.info("Staging")
+        while True:
+            vessel.control.activate_next_stage()
+            logger.info("Staging")
+            if vessel.available_thrust > 0:
+                break
         auto_stage.available_thrust = vessel.available_thrust - 10
 
 
@@ -87,15 +90,8 @@ def do_prelaunch():
     vessel.control.throttle = 1.0
 
 
-def do_launch(seconds):
-    """Launch the rocket after `seconds` countdown, pointing straight up
-
-    Parameters:
-    `seconds`: Time until launch in seconds
-    """
-
-    # Countdown...
-    countdown(5)
+def do_launch():
+    """Launch the rocket pointing straight up"""
 
     # Activate the first stage
     vessel.auto_pilot.engage()
@@ -106,7 +102,7 @@ def do_launch(seconds):
         time.sleep(1)
 
 
-def do_ascent(target_altitude=100000, target_heading=90):
+def do_ascent(target_altitude=100_000, target_heading=90):
     """Perform an ascent, pitching over as the eocket climbs.
 
     Parameters:
@@ -217,7 +213,6 @@ def show_orbit():
     logger.info(s)
 
 
-# @log_as(logger, logging.DEBUG)
 def hill_climb(data, score_function):
     """Modify the list of data and use the score_function to improve it
 
@@ -227,7 +222,7 @@ def hill_climb(data, score_function):
     """
     current_score = score_function(data)
     current_best = data.copy()
-    for step in [100, 10, 1, 0.1, 0.01, 0.001, 0.0001]:
+    for step in [100, 10, 1, 0.1, 0.01, 0.001]:
         improved = True
         while improved:
             # Create a list of candidate data lists with each elements adjusted by +/-step
@@ -320,7 +315,7 @@ def wait_until_time(ut_time, use_warp=True):
         lead_time = 5
         ksc.warp_to(ut_time - lead_time)
     # Wait for the last few seconds
-    while ksc.ut - ut_time > 0:
+    while ut_time - ksc.ut > 0:
         pass
 
 
@@ -336,8 +331,10 @@ def execute_burn(node):
         dv = remaining_delta_v()
         last_dv = dv
         while dv > 0.01:
+            auto_stage()
             engine_dv = vessel.available_thrust / vessel.mass
-            vessel.control.throttle = max(min((dv / engine_dv), 1), 0.01)
+            if engine_dv > 0:
+                vessel.control.throttle = max(min((dv / engine_dv), 1), 0.01)
             last_dv = dv
             dv = remaining_delta_v()
             if dv > last_dv + 0.01:
@@ -360,6 +357,18 @@ def execute_next_node():
         logger.error("execute_next_node: No Node to execute")
 
 
+def do_circularisation():
+    """Work out and execute the circularization burn
+
+    Only need to adjust the prograde burn as it will always be at the apoapsis
+    """
+    logger.info("Circularising orbit")
+
+    delta_v = hill_climb([0], score_eccenticity)[0]
+    vessel.control.add_node(ksc.ut + vessel.orbit.time_to_apoapsis, prograde=delta_v)
+    execute_next_node()
+
+
 ###################################################
 #
 # Go to space
@@ -368,19 +377,16 @@ def execute_next_node():
 
 show_features()
 do_prelaunch()
-do_launch(5)
+countdown(5)
+do_launch()
 do_ascent(TARGET_ALTITUDE, TARGET_HEADING)
 do_coast(TARGET_ALTITUDE)
-
-# Work out the circularization burn, only need to adjust the prograde burn as it will
-# always be at the apoapsis
-delta_v = hill_climb([0], score_eccenticity)[0]
-node = vessel.control.add_node(ksc.ut + vessel.orbit.time_to_apoapsis, prograde=delta_v)
-execute_next_node()
+do_circularisation()
 
 logger.info("Launch complete")
 
-time.sleep(10)
+# Wait for the orbit to settle
+time.sleep(2)
 show_orbit()
 
 logger.info("PROGRAM ENDED")

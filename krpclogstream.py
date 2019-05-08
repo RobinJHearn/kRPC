@@ -11,9 +11,9 @@ logger.addHandler(logging.NullHandler)
 
 
 class KrpcLogStream(object):
-    """Class to write log messages to a windows in KSP
+    """Class to write log messages to a window in KSP
 
-    When the window is full deletes the earliest message
+    When the window is full delete the earliest message
     """
 
     def __init__(self, conn, w=200, h=300, x=150, y=0):
@@ -46,7 +46,7 @@ class KrpcLogStream(object):
         s = ""
         for l in self.lines:
             s += l
-            if l.count("\n") == 0:
+            if s[-1] != "\n":
                 s += "\n"
         self.text.content = s
 
