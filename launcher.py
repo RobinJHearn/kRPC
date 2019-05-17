@@ -5,8 +5,10 @@ import time
 import krpc
 
 import krpclogstream
+import krpcutils
 import pid
 from decorators import log_as, log_debug
+from hillclimb import hill_climb
 from vector import Vector
 
 # Configurable Features
@@ -21,14 +23,14 @@ FEATURES = {
 TARGET_ALTITUDE = 100_000
 TARGET_HEADING = 90
 
-# Universal Constants
-G0 = 9.80665
-
 # Configure connection to KSP and some short cuts
 conn = krpc.connect(name="Launch into orbit")
 ksc = conn.space_center  # pylint: disable=no-member
 vessel = ksc.active_vessel
 SASMode = ksc.SASMode
+
+# Create the utility package
+utils = krpcutils.kRPC_Utilities(conn)
 
 # Configure logging
 logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
@@ -55,19 +57,6 @@ def limit(value, min_value=0, max_value=1):
     `max_value: maximum value allowed
     """
     return min(max(value, min_value), max_value)
-
-
-def auto_stage():
-    """Stage engines when thrust drops"""
-    if not hasattr(auto_stage, "available_thrust"):
-        auto_stage.available_thrust = vessel.available_thrust - 10
-    if vessel.available_thrust < auto_stage.available_thrust:
-        while True:
-            vessel.control.activate_next_stage()
-            logger.info("Staging")
-            if vessel.available_thrust > 0:
-                break
-        auto_stage.available_thrust = vessel.available_thrust - 10
 
 
 def countdown(seconds):
@@ -130,7 +119,7 @@ def do_ascent(target_altitude=100_000, target_heading=90):
         while apoapsis() < target_altitude * 0.95:
 
             # Get rid of any used stages
-            auto_stage()
+            utils.auto_stage()
 
             # Adjust the pitch
             vessel.auto_pilot.target_pitch = max(
@@ -176,19 +165,8 @@ def do_coast(altitude):
             vessel.control.throttle = limit(
                 vessel.control.throttle + coast_pid.update(apoapsis())
             )
-            auto_stage
+            utils.auto_stage()
             time.sleep(0.1)
-
-
-def set_sas_mode(new_mode):
-    """Set an SAS mode, if all goes well returns True, if any exception is thrown then return False"""
-    try:
-        vessel.control.sas = True
-        time.sleep(0.1)
-        vessel.control.sas_mode = new_mode
-        return True
-    except:
-        return False
 
 
 def convert_time(seconds):
@@ -213,39 +191,6 @@ def show_orbit():
     logger.info(s)
 
 
-def hill_climb(data, score_function):
-    """Modify the list of data and use the score_function to improve it
-
-    Parameters:
-    `data`: a list of data points that can be manipulated
-    `score_function`: a function that can take the data list and return a score, lower score is better
-    """
-    current_score = score_function(data)
-    current_best = data.copy()
-    for step in [100, 10, 1, 0.1, 0.01, 0.001]:
-        improved = True
-        while improved:
-            # Create a list of candidate data lists with each elements adjusted by +/-step
-            candidates = []
-            for c in range(0, len(data)):
-                inc = current_best.copy()
-                dec = current_best.copy()
-                inc[c] += step
-                dec[c] -= step
-                candidates += [inc, dec]
-            # Score each candidate
-            improved = False
-            for c in candidates:
-                score = score_function(c)
-                if score < current_score:
-                    current_score = score
-                    current_best = c
-                    improved = True
-        logger.debug(f"Hill Climb Results: Step={step}, Score={current_score}")
-    logger.debug(f"Hill Climb: Best Score={current_score}, Result={current_best}")
-    return current_best
-
-
 def score_eccenticity(data):
     """Score function for the hill climb to circularise an orbit
 
@@ -254,107 +199,10 @@ def score_eccenticity(data):
     Parameters:
     `data`: list with single item - prograde deltaV burn
     """
-    node = vessel.control.add_node(
-        ksc.ut + vessel.orbit.time_to_apoapsis, prograde=data[0]
-    )
+    node = utils.add_node([ksc.ut + vessel.orbit.time_to_apoapsis, data[0]])
     score = node.orbit.eccentricity
     node.remove()
     return score
-
-
-def calculate_burn_time(node):
-    # Calculate burn time (using rocket equation)
-    f = vessel.available_thrust
-    isp = vessel.specific_impulse * G0
-    m0 = vessel.mass
-    m1 = m0 / math.exp(node.delta_v / isp)
-    flow_rate = f / isp
-    return (m0 - m1) / flow_rate
-
-
-def align_with_node(node):
-    """Align the ship with the burn vector of the node
-
-    Parameters:
-    `node`: The node to align with
-    """
-    logger.info("Orientating ship for burn")
-    if FEATURES["USE_SAS"]:
-        vessel.auto_pilot.disengage()
-        if set_sas_mode(SASMode.maneuver):
-            logger.info("Using SAS")
-            pointing_at_node = False
-            n = Vector(0, 1, 0)
-            with conn.stream(
-                getattr, vessel.flight(node.reference_frame), "direction"
-            ) as facing:
-                while not pointing_at_node:
-                    d = Vector(facing())
-                    if d.angle(n) < 2:
-                        pointing_at_node = True
-                    time.sleep(0.1)
-            logger.info("Returning to Auto Pilot")
-        else:
-            logger.info("Using auto pilot")
-
-    vessel.auto_pilot.sas = False
-    vessel.auto_pilot.reference_frame = node.reference_frame
-    vessel.auto_pilot.target_direction = (0, 1, 0)
-    vessel.auto_pilot.engage()
-    vessel.auto_pilot.wait()
-
-
-def wait_until_time(ut_time, use_warp=True):
-    """Wait until it is specified absolute time
-
-    Parameters:
-    `ut_time`: Absolute universal time in seconds to wait until
-    """
-    logger.info("Waiting until time")
-    if use_warp:
-        lead_time = 5
-        ksc.warp_to(ut_time - lead_time)
-    # Wait for the last few seconds
-    while ut_time - ksc.ut > 0:
-        pass
-
-
-def execute_burn(node):
-    """Execute the burn defined by the node, assume the craft is already aligned for the burn
-
-    Parameters:
-    `node`: Node defining the deltaV needed for the burn
-    """
-    logger.info("Executing burn")
-
-    with conn.stream(getattr, node, "remaining_delta_v") as remaining_delta_v:
-        dv = remaining_delta_v()
-        last_dv = dv
-        while dv > 0.01:
-            auto_stage()
-            engine_dv = vessel.available_thrust / vessel.mass
-            if engine_dv > 0:
-                vessel.control.throttle = max(min((dv / engine_dv), 1), 0.01)
-            last_dv = dv
-            dv = remaining_delta_v()
-            if dv > last_dv + 0.01:
-                break
-    vessel.control.throttle = 0.0
-
-
-def execute_next_node():
-    """Execute the next node and then remove it from the plan"""
-    if len(vessel.control.nodes) > 0:
-        node = vessel.control.nodes[0]
-
-        burn_time = calculate_burn_time(node)
-        align_with_node(node)
-        wait_until_time(node.ut - (burn_time / 2))
-        execute_burn(node)
-
-        node.remove()
-    else:
-        logger.error("execute_next_node: No Node to execute")
 
 
 def do_circularisation():
@@ -365,8 +213,37 @@ def do_circularisation():
     logger.info("Circularising orbit")
 
     delta_v = hill_climb([0], score_eccenticity)[0]
-    vessel.control.add_node(ksc.ut + vessel.orbit.time_to_apoapsis, prograde=delta_v)
-    execute_next_node()
+    utils.add_node([ksc.ut + vessel.orbit.time_to_apoapsis, delta_v])
+    utils.execute_next_node(FEATURES["USE_SAS"])
+
+
+def score_inclination(target_inclination):
+    """Wrapper to set a target inclination value"""
+
+    def score_function(data):
+        """Scoring function for inclination changes
+
+        Parameters:
+        `data`: list of four items representing time, prograde, radial and normal burns
+        """
+        node = utils.add_node(data)
+        score = abs(node.orbit.inclination - target_inclination)
+        node.remove()
+        return score
+
+    return score_function
+
+
+def inclination_change(inclination):
+    """Change inclination of orbit"""
+    logger.info(f"Changing orbit inclination to {inclination} degrees")
+
+    score_function = score_inclination(inclination)
+    data = hill_climb([ksc.ut + 60, 0, 0, 0], score_function)
+    utils.add_node(data)
+
+
+#    utils.execute_next_node(FEATURES["USE_SAS"])
 
 
 ###################################################
@@ -388,5 +265,7 @@ logger.info("Launch complete")
 # Wait for the orbit to settle
 time.sleep(2)
 show_orbit()
+
+inclination_change(5)
 
 logger.info("PROGRAM ENDED")

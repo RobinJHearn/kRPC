@@ -1,5 +1,5 @@
 #
-# Decorator to set logger level
+# Decorators
 #
 import logging
 import functools
@@ -48,3 +48,16 @@ def log_info(logger):
 def log_debug(logger):
     """Set the logger level to debug for the decorated function"""
     return log_as(logger, logging.DEBUG)
+
+
+def singleton(cls):
+    """Make a class a singleton"""
+    instances = {}
+
+    def get_instance(*args, **kwargs):
+        if cls not in instances:
+            instances[cls] = cls(*args, **kwargs)
+        return instances[cls]
+
+    return get_instance
+
