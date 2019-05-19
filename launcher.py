@@ -226,8 +226,10 @@ def score_inclination(target_inclination):
         Parameters:
         `data`: list of four items representing time, prograde, radial and normal burns
         """
-        node = utils.add_node(data)
-        score = abs(node.orbit.inclination - target_inclination)
+        node = utils.add_node([data[0], 0, 0, data[1]])
+        inclination = math.degrees(node.orbit.inclination)
+        logger.debug(f"target inc: {target_inclination} node.inc: {inclination}")
+        score = abs(inclination - target_inclination)
         node.remove()
         return score
 
@@ -235,12 +237,16 @@ def score_inclination(target_inclination):
 
 
 def inclination_change(inclination):
-    """Change inclination of orbit"""
+    """Change inclination of orbit
+
+    Inclination change only requires a normal burn (preferrably at an
+    ascending or descending node)
+    """
     logger.info(f"Changing orbit inclination to {inclination} degrees")
 
     score_function = score_inclination(inclination)
-    data = hill_climb([ksc.ut + 60, 0, 0, 0], score_function)
-    utils.add_node(data)
+    data = hill_climb([ksc.ut + 60, 0], score_function)
+    utils.add_node([data[0], 0, 0, data[1]])
 
 
 #    utils.execute_next_node(FEATURES["USE_SAS"])
@@ -252,20 +258,43 @@ def inclination_change(inclination):
 #
 ###################################################
 
-show_features()
-do_prelaunch()
-countdown(5)
-do_launch()
-do_ascent(TARGET_ALTITUDE, TARGET_HEADING)
-do_coast(TARGET_ALTITUDE)
-do_circularisation()
+# show_features()
+# do_prelaunch()
+# countdown(5)
+# do_launch()
+# do_ascent(TARGET_ALTITUDE, TARGET_HEADING)
+# do_coast(TARGET_ALTITUDE)
+# do_circularisation()
 
-logger.info("Launch complete")
+# logger.info("Launch complete")
 
-# Wait for the orbit to settle
-time.sleep(2)
-show_orbit()
+# # Wait for the orbit to settle
+# time.sleep(2)
+# show_orbit()
 
-inclination_change(5)
+while True:
+    # Ascending node is when mean anomaly = PI/2 (90 degrees)
+    # Descending node is when mean anomaly = 3PI/2 (270 degrees)
+    # Mean anomaly =0 at periapsis, PI at apoapsis
+    M1 = (math.pi / 2) - vessel.orbit.eccentricity
+    M2 = (3 * math.pi / 2) - vessel.orbit.eccentricity
+    theta = math.degrees(vessel.orbit.true_anomaly)
+    if theta > 270 or theta < 90:
+        Mx = M1
+        node = "M1"
+    else:
+        Mx = M2
+        node = "M2"
+    P = vessel.orbit.period
+    n = 2 * math.pi / P
+    M = vessel.orbit.mean_anomaly
+    t1 = (M1 - M) / n
+    t2 = (M2 - M) / n
+    print(
+        f"Time to next node M1 = {convert_time(t1)} seconds, M2 = {convert_time(t2)} M = {math.degrees(M)}"
+    )
+    time.sleep(1)
+
+inclination_change(15)
 
 logger.info("PROGRAM ENDED")

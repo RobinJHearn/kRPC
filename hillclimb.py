@@ -2,6 +2,8 @@
 # Simple hill climb routine
 #
 import logging
+import math
+
 import decorators
 
 logger = logging.getLogger(__name__)
@@ -22,11 +24,19 @@ def hill_climb(data, score_function):
         while improved:
             # Create a list of candidate data lists with each elements adjusted by +/-step
             candidates = []
-            for c in range(0, len(data)):
+            # for c in range(0, len(data)):
+            #     inc = current_best.copy()
+            #     dec = current_best.copy()
+            #     inc[c] += step
+            #     dec[c] -= step
+            #     candidates += [inc, dec]
+            for c in range(1, int(math.pow(2, len(data)))):
                 inc = current_best.copy()
                 dec = current_best.copy()
-                inc[c] += step
-                dec[c] -= step
+                for b in range(0, len(data)):
+                    if c & (1 << b) != 0:
+                        inc[b] += step
+                        dec[b] += step
                 candidates += [inc, dec]
             # Score each candidate
             improved = False
@@ -36,7 +46,8 @@ def hill_climb(data, score_function):
                     current_score = score
                     current_best = c
                     improved = True
-        logger.debug(f"Hill Climb Results: Step={step}, Score={current_score}")
-    logger.debug(f"Hill Climb: Best Score={current_score}, Result={current_best}")
+            logger.debug(
+                f"Hill Climb Results: Step={step}, Score={current_score}, Result={current_best}"
+            )
+    logger.info(f"Hill Climb Results: Score={current_score}, Result={current_best}")
     return current_best
-
