@@ -21,7 +21,7 @@ FEATURES = {
 
 # Launch parameters
 TARGET_ALTITUDE = 100_000
-TARGET_HEADING = 90
+TARGET_INCLINATION = -90
 
 # Configure connection to KSP and some short cuts
 conn = krpc.connect(name="Launch into orbit")
@@ -46,17 +46,6 @@ def show_features():
     """Log out the configurable features and their state"""
     for k, v in FEATURES.items():
         logger.info(f"{k} -> {v}")
-
-
-def limit(value, min_value=0, max_value=1):
-    """Limit a `value` to between the `minValue` and `maxValue` inclusive
-
-    Parameters:
-    `value`: value to limit
-    `min_value`: minimum value allowed
-    `max_value: maximum value allowed
-    """
-    return min(max(value, min_value), max_value)
 
 
 def countdown(seconds):
@@ -91,17 +80,21 @@ def do_launch():
         time.sleep(1)
 
 
-def do_ascent(target_altitude=100_000, target_heading=90):
-    """Perform an ascent, pitching over as the eocket climbs.
+def do_ascent(target_altitude=100_000, target_inclination=0):
+    """Perform an ascent, pitching over as the rocket climbs.
 
     Parameters:
     `target_altitude`: the target altituide to reach
     `target_heading`: the heading to use when ascending
     """
-    logger.info(f"Ascending to apoapsis {target_altitude} on heading {target_heading}")
+    logger.info(
+        f"Ascending to apoapsis {target_altitude} on heading {target_inclination}"
+    )
 
     # Set the initial parameters, heading, pitch and roll
-    vessel.auto_pilot.target_heading = target_heading
+    heading = utils.launch_heading(target_inclination, target_altitude)
+    logger.info(f"Target heading {heading}")
+    vessel.auto_pilot.target_heading = heading
     vessel.auto_pilot.target_pitch = 90
     if FEATURES["PERFORM_ASCENT_ROLL"]:
         vessel.auto_pilot.target_roll = 0
@@ -125,6 +118,8 @@ def do_ascent(target_altitude=100_000, target_heading=90):
             vessel.auto_pilot.target_pitch = max(
                 88.963 - 1.03287 * altitude() ** 0.409511, 0
             )
+
+            logger.debug(f"Current Heading {vessel.auto_pilot.target_heading}")
 
             if not FEATURES["FULL_BURN"]:
                 # Apply a simple change to thrust based on time to apoapsis
@@ -162,7 +157,7 @@ def do_coast(altitude):
         getattr, vessel.flight(), "mean_altitude"
     ) as altitude, conn.stream(getattr, vessel.orbit, "apoapsis_altitude") as apoapsis:
         while altitude() < atmosphere_depth:
-            vessel.control.throttle = limit(
+            vessel.control.throttle = utils.limit(
                 vessel.control.throttle + coast_pid.update(apoapsis())
             )
             utils.auto_stage()
@@ -174,7 +169,7 @@ def convert_time(seconds):
     m, s = divmod(seconds, 60)
     h, m = divmod(m, 60)
     d, h = divmod(h, 6)
-    return f"{int(d)}:{int(h)}:{int(m)}:{s:f}"
+    return f"{int(d)}:{int(h):02}:{int(m):02}:{s:02.2f}"
 
 
 def show_orbit():
@@ -217,19 +212,20 @@ def do_circularisation():
     utils.execute_next_node(FEATURES["USE_SAS"])
 
 
-def score_inclination(target_inclination):
+def score_inclination(target_inclination, target_time):
     """Wrapper to set a target inclination value"""
 
+    @log_debug(logger)
     def score_function(data):
         """Scoring function for inclination changes
 
         Parameters:
-        `data`: list of four items representing time, prograde, radial and normal burns
+        `data`: list of three items representing prograde, radial and normal burns
         """
-        node = utils.add_node([data[0], 0, 0, data[1]])
+        node = utils.add_node([target_time, 0, 0, data[0]])
         inclination = math.degrees(node.orbit.inclination)
         logger.debug(f"target inc: {target_inclination} node.inc: {inclination}")
-        score = abs(inclination - target_inclination)
+        score = abs(target_inclination - inclination)
         node.remove()
         return score
 
@@ -244,9 +240,17 @@ def inclination_change(inclination):
     """
     logger.info(f"Changing orbit inclination to {inclination} degrees")
 
-    score_function = score_inclination(inclination)
-    data = hill_climb([ksc.ut + 60, 0], score_function)
-    utils.add_node([data[0], 0, 0, data[1]])
+    (an_time, dn_time) = utils.time_ascending_descending_nodes(delta_time=False)
+    # Which node do we want
+    if inclination > math.degrees(vessel.orbit.inclination):
+        # Going down so descending node
+        node_time = dn_time
+    else:
+        node_time = an_time
+
+    score_function = score_inclination(inclination, node_time)
+    data = hill_climb([0], score_function)[0]
+    utils.add_node([node_time, 0, 0, data])
 
 
 #    utils.execute_next_node(FEATURES["USE_SAS"])
@@ -258,43 +262,27 @@ def inclination_change(inclination):
 #
 ###################################################
 
-# show_features()
-# do_prelaunch()
-# countdown(5)
-# do_launch()
-# do_ascent(TARGET_ALTITUDE, TARGET_HEADING)
-# do_coast(TARGET_ALTITUDE)
-# do_circularisation()
+show_features()
+do_prelaunch()
+countdown(5)
+do_launch()
+do_ascent(TARGET_ALTITUDE, TARGET_INCLINATION)
+do_coast(TARGET_ALTITUDE)
+do_circularisation()
 
-# logger.info("Launch complete")
+logger.info("Launch complete")
 
-# # Wait for the orbit to settle
-# time.sleep(2)
-# show_orbit()
+# Wait for the orbit to settle
+time.sleep(2)
+show_orbit()
 
 while True:
-    # Ascending node is when mean anomaly = PI/2 (90 degrees)
-    # Descending node is when mean anomaly = 3PI/2 (270 degrees)
-    # Mean anomaly =0 at periapsis, PI at apoapsis
-    M1 = (math.pi / 2) - vessel.orbit.eccentricity
-    M2 = (3 * math.pi / 2) - vessel.orbit.eccentricity
-    theta = math.degrees(vessel.orbit.true_anomaly)
-    if theta > 270 or theta < 90:
-        Mx = M1
-        node = "M1"
-    else:
-        Mx = M2
-        node = "M2"
-    P = vessel.orbit.period
-    n = 2 * math.pi / P
-    M = vessel.orbit.mean_anomaly
-    t1 = (M1 - M) / n
-    t2 = (M2 - M) / n
     print(
-        f"Time to next node M1 = {convert_time(t1)} seconds, M2 = {convert_time(t2)} M = {math.degrees(M)}"
+        f"Inclination = {math.degrees(vessel.orbit.inclination)}({vessel.orbit.inclination})"
     )
-    time.sleep(1)
+    time.sleep(5)
 
-inclination_change(15)
+
+inclination_change(-5)
 
 logger.info("PROGRAM ENDED")

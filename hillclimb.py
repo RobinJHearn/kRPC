@@ -36,7 +36,7 @@ def hill_climb(data, score_function):
                 for b in range(0, len(data)):
                     if c & (1 << b) != 0:
                         inc[b] += step
-                        dec[b] += step
+                        dec[b] -= step
                 candidates += [inc, dec]
             # Score each candidate
             improved = False

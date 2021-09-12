@@ -7,13 +7,15 @@ import time
 
 import krpc
 
-from decorators import singleton
+from decorators import singleton, log_as
 from vector import Vector
 
 logger = logging.getLogger(__name__)
 
 # Universal Constants
 G0 = 9.80665
+HOURS_PER_DAY = 6
+SECONDS_PER_DEGREE = 60
 
 
 @singleton
@@ -151,3 +153,146 @@ class kRPC_Utilities(object):
             ut=data[0], prograde=prograde, radial=radial, normal=normal
         )
         return node
+
+    def time_ascending_descending_nodes(self, delta_time=False):
+        """Calculate time to/of ascending and descending nodes
+
+        Parameters:
+        `delta_time`: Boolean if True a time until is returned, if False the an absolute time is returned
+        Returns:
+        Tuple containing (Time to Ascending Node, Time To Descending Node)
+        """
+        # Argument of periapsis is angle from ascending node to periapsis
+        ap = self.vessel.orbit.argument_of_periapsis
+        tau = math.pi * 2
+        period = self.vessel.orbit.period
+
+        # Convert to angle FROM periapsis to AN
+        peri_to_an = tau - ap
+        # DN is opposite AN
+        peri_to_dn = (
+            peri_to_an - math.pi if peri_to_an >= math.pi else peri_to_an + math.pi
+        )
+
+        # Calculate delta time so we can mod by the period to get the shortest time from now
+        time_now = self.ksc.ut
+        time_an = (self.vessel.orbit.ut_at_true_anomaly(peri_to_an) - time_now) % period
+        time_dn = (self.vessel.orbit.ut_at_true_anomaly(peri_to_dn) - time_now) % period
+
+        if not delta_time:
+            time_an = time_an + time_now
+            time_dn = time_dn + time_now
+
+        return (time_an, time_dn)
+
+    def limit_absolute_angle(self, angle):
+        """Limit an angle to absolue value 0..360
+
+        Parameters:
+        `angle`: Angle in degrees to limt
+        """
+        while angle < 0:
+            angle += 360
+        while angle >= 360:
+            angle -= 360
+        return angle
+
+    def limit(self, value, min_value=0, max_value=1):
+        """Limit a `value` to between the `minValue` and `maxValue` inclusive
+
+        Parameters:
+        `value`: value to limit
+        `min_value`: minimum value allowed
+        `max_value: maximum value allowed
+        """
+        return min(max(value, min_value), max_value)
+
+    #
+    #  function calculateInclination {
+    #    parameter inclination, orbitAltitude.
+    #
+    #    set inclination to mod(inclination + 360, 360).               // Convert to 0..360
+    #    local cosAngle is cos(inclination)/cos(ship:latitude).
+    #    if abs(cosAngle) > 1 if inclination < 90 or inclination > 270 return 90. else return 270.
+    #    local launchAngle is arcsin(cosAngle).
+    #    if inclination > 180 set launchAngle to 180 - launchAngle.
+
+    #    local binertial is mod(launchAngle + 360, 360).                           // 0..360
+    #    local binertial is headingForInclination(inclination).
+    #    local vorbit is sqrt(ship:body:mu/(ship:body:radius + orbitAltitude)).
+    #    local veqrot is (2 * constant:PI * ship:body:radius) / ship:body:rotationperiod.
+    #    local vxrot is vorbit * sin(binertial) - veqrot * cos(ship:latitude).
+    #    local vyrot is vorbit * cos(binertial).
+    #    local brot is arctan(vxrot/vyrot).
+    #    if inclination >= 180 set brot to 180 + brot.
+    #    return brot.
+    #  }
+
+    def launch_heading(self, inclination, orbitAltitude):
+        """Calculate the launch heading to achive a desired orbital inclination
+
+        Parameters:
+        `inclination`: Desired inclination in degrees
+        `orbitAltitude`: Height in metres above the surface of the desired orbit
+        """
+
+        logger.debug(f"Requested Inclination {inclination}, altitude {orbitAltitude}")
+        # Make an absolute inclination (0 = East, 90 = North)
+        abs_inclination = self.limit_absolute_angle(inclination)
+        # Account for launch site latitude, the inclination must be less than the laucnh
+        # site latitude
+        site_latitude = self.vessel.flight().latitude
+        # Convert so 0 is east
+        cos_inclination = math.cos(math.radians(abs_inclination))
+        cos_launch_site = math.cos(math.radians(site_latitude))
+        if math.fabs(abs_inclination) >= math.fabs(site_latitude):
+            cos_angle = self.limit(cos_inclination / cos_launch_site, -1, 1)
+            launch_angle = math.degrees(math.asin(cos_angle))
+            if abs_inclination >= 180:
+                launch_angle = 180 - launch_angle
+        else:
+            if cos_inclination >= 0:
+                launch_angle = 90
+            else:
+                launch_angle = 270
+
+        logger.debug(f"Launch Angle {launch_angle}")
+
+        mu = self.ksc.g * self.vessel.orbit.body.mass
+        body_radius = self.vessel.orbit.body.equatorial_radius
+        orbit_from_centre = body_radius + orbitAltitude
+        v_orbit = math.sqrt(mu / orbit_from_centre)
+        v_equator = (
+            2 * math.pi * body_radius
+        ) / self.vessel.orbit.body.rotational_period
+        v_x = (v_orbit * math.sin(math.radians(launch_angle))) - (
+            v_equator * cos_launch_site
+        )
+        v_y = v_orbit * math.cos(math.radians(launch_angle))
+        b_rot = math.degrees(math.atan(v_x / v_y))
+        if abs_inclination >= 180:
+            b_rot = 180 + b_rot
+
+        return b_rot
+
+
+#    local vorbit is sqrt(ship:body:mu/(ship:body:radius + orbitAltitude)).
+#    local veqrot is (2 * constant:PI * ship:body:radius) / ship:body:rotationperiod.
+#    local vxrot is vorbit * sin(binertial) - veqrot * cos(ship:latitude).
+#    local vyrot is vorbit * cos(binertial).
+#    local brot is arctan(vxrot/vyrot).
+#    if inclination >= 180 set brot to 180 + brot.
+#    return brot.
+
+
+if __name__ == "__main__":
+    logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.DEBUG)
+
+    conn = krpc.connect(name="Test Code")
+    # Create the utility package
+    utils = kRPC_Utilities(conn)
+    for inc in range(0, 360, 30):
+        head = utils.launch_heading(inc, 100000)
+        logger.info(f"Data: {inc}, {head}")
