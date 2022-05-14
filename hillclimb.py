@@ -1,6 +1,5 @@
-#
-# Simple hill climb routine
-#
+""" Simple hill climb routine """
+
 import logging
 import math
 
@@ -15,7 +14,8 @@ def hill_climb(data, score_function):
 
     Parameters:
     `data`: a list of data points that can be manipulated
-    `score_function`: a function that can take the data list and return a score, lower score is better
+    `score_function`: a function that can take the data list and return a score,
+                      lower score is better
     """
     current_score = score_function(data)
     current_best = data.copy()
@@ -30,24 +30,27 @@ def hill_climb(data, score_function):
             #     inc[c] += step
             #     dec[c] -= step
             #     candidates += [inc, dec]
-            for c in range(1, int(math.pow(2, len(data)))):
+            for current in range(1, int(math.pow(2, len(data)))):
                 inc = current_best.copy()
                 dec = current_best.copy()
-                for b in range(0, len(data)):
-                    if c & (1 << b) != 0:
-                        inc[b] += step
-                        dec[b] -= step
+                for index in range(0, len(data)):
+                    if current & (1 << index) != 0:
+                        inc[index] += step
+                        dec[index] -= step
                 candidates += [inc, dec]
             # Score each candidate
             improved = False
-            for c in candidates:
-                score = score_function(c)
+            for current in candidates:
+                score = score_function(current)
                 if score < current_score:
                     current_score = score
-                    current_best = c
+                    current_best = current
                     improved = True
             logger.debug(
-                f"Hill Climb Results: Step={step}, Score={current_score}, Result={current_best}"
+                "Hill Climb Results: Step=%s, Score=%s, Result=%s",
+                step,
+                current_score,
+                current_best,
             )
-    logger.info(f"Hill Climb Results: Score={current_score}, Result={current_best}")
+    logger.info("Hill Climb Results: Score=%s, Result=%s", current_score, current_best)
     return current_best

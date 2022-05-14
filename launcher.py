@@ -1,3 +1,4 @@
+"""Launch a rocket"""
 import logging
 import math
 import time
@@ -6,22 +7,22 @@ import krpc
 
 import krpclogstream
 import krpcutils
+import circularise
 import pid
-from decorators import log_as, log_debug
+from decorators import log_debug
 from hillclimb import hill_climb
-from vector import Vector
 
 # Configurable Features
 FEATURES = {
     "FULL_BURN": False,  # Don't reduce throttle on ascent burn
     "USE_SAS": True,  # Use SAS to point for maneuver
-    "PERFORM_ASCENT_ROLL": False,  # Roll rocket on launch ala NASA
+    "PERFORM_ASCENT_ROLL": True,  # Roll rocket on launch ala NASA
     "SHOW_LOG_IN_KSP": False,  # Show log in a window in KSP
 }
 
 # Launch parameters
 TARGET_ALTITUDE = 100_000
-TARGET_INCLINATION = -90
+TARGET_INCLINATION = 0
 
 # Configure connection to KSP and some short cuts
 conn = krpc.connect(name="Launch into orbit")
@@ -30,7 +31,8 @@ vessel = ksc.active_vessel
 SASMode = ksc.SASMode
 
 # Create the utility package
-utils = krpcutils.kRPC_Utilities(conn)
+utils = krpcutils.KrpcUtilities(conn)
+circularise = circularise.Circularise(conn)
 
 # Configure logging
 logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
@@ -44,20 +46,8 @@ if FEATURES["SHOW_LOG_IN_KSP"]:
 
 def show_features():
     """Log out the configurable features and their state"""
-    for k, v in FEATURES.items():
-        logger.info(f"{k} -> {v}")
-
-
-def countdown(seconds):
-    """Display a simple countdown to launch
-
-    Parameters:
-    `seconds`: the number of ticks in the countdown
-    """
-    for t in range(seconds, 0, -1):
-        logger.info(f"{t}...")
-        time.sleep(1)
-    logger.info("Launch!")
+    for key, value in FEATURES.items():
+        logger.info("%s -> %s", key, value)
 
 
 def do_prelaunch():
@@ -88,12 +78,12 @@ def do_ascent(target_altitude=100_000, target_inclination=0):
     `target_heading`: the heading to use when ascending
     """
     logger.info(
-        f"Ascending to apoapsis {target_altitude} on heading {target_inclination}"
+        "Ascending to apoapsis %s} on heading %s", target_altitude, target_inclination
     )
 
     # Set the initial parameters, heading, pitch and roll
     heading = utils.launch_heading(target_inclination, target_altitude)
-    logger.info(f"Target heading {heading}")
+    logger.info("Target heading %s", heading)
     vessel.auto_pilot.target_heading = heading
     vessel.auto_pilot.target_pitch = 90
     if FEATURES["PERFORM_ASCENT_ROLL"]:
@@ -119,7 +109,7 @@ def do_ascent(target_altitude=100_000, target_inclination=0):
                 88.963 - 1.03287 * altitude() ** 0.409511, 0
             )
 
-            logger.debug(f"Current Heading {vessel.auto_pilot.target_heading}")
+            logger.debug("Current Heading %s", vessel.auto_pilot.target_heading)
 
             if not FEATURES["FULL_BURN"]:
                 # Apply a simple change to thrust based on time to apoapsis
@@ -144,7 +134,7 @@ def do_coast(altitude):
     Parameters:
     `altitude`: the target altitude to hold
     """
-    logger.info(f"Coasting out of atmosphere to apoapsis of {altitude}")
+    logger.info("Coasting out of atmosphere to apoapsis of %s", altitude)
 
     vessel.auto_pilot.target_pitch = 0
 
@@ -164,54 +154,6 @@ def do_coast(altitude):
             time.sleep(0.1)
 
 
-def convert_time(seconds):
-    """Convert a number of seconds to days:hours:minutes:seconds string"""
-    m, s = divmod(seconds, 60)
-    h, m = divmod(m, 60)
-    d, h = divmod(h, 6)
-    return f"{int(d)}:{int(h):02}:{int(m):02}:{s:02.2f}"
-
-
-def show_orbit():
-    """Show current orbit parameters"""
-    orbit = vessel.orbit
-    s = ""
-    s += f"\nOrbiting {orbit.body.name}"
-    s += f"\nApoapsis = {orbit.apoapsis_altitude}"
-    s += f"\nPeriapsis = {orbit.periapsis_altitude}"
-    s += f"\nEccentricty = {orbit.eccentricity}"
-    s += f"\nInclination = {math.degrees(orbit.inclination)}"
-    s += f"\nPeriod = {convert_time(orbit.period)}"
-
-    logger.info(s)
-
-
-def score_eccenticity(data):
-    """Score function for the hill climb to circularise an orbit
-
-    Only need to tweak the prograde as the time will always be at apoapsis and
-    to circularise only requires a prograde burn
-    Parameters:
-    `data`: list with single item - prograde deltaV burn
-    """
-    node = utils.add_node([ksc.ut + vessel.orbit.time_to_apoapsis, data[0]])
-    score = node.orbit.eccentricity
-    node.remove()
-    return score
-
-
-def do_circularisation():
-    """Work out and execute the circularization burn
-
-    Only need to adjust the prograde burn as it will always be at the apoapsis
-    """
-    logger.info("Circularising orbit")
-
-    delta_v = hill_climb([0], score_eccenticity)[0]
-    utils.add_node([ksc.ut + vessel.orbit.time_to_apoapsis, delta_v])
-    utils.execute_next_node(FEATURES["USE_SAS"])
-
-
 def score_inclination(target_inclination, target_time):
     """Wrapper to set a target inclination value"""
 
@@ -224,7 +166,7 @@ def score_inclination(target_inclination, target_time):
         """
         node = utils.add_node([target_time, 0, 0, data[0]])
         inclination = math.degrees(node.orbit.inclination)
-        logger.debug(f"target inc: {target_inclination} node.inc: {inclination}")
+        logger.debug("target inc: %s node.inc: %s", target_inclination, inclination)
         score = abs(target_inclination - inclination)
         node.remove()
         return score
@@ -238,7 +180,7 @@ def inclination_change(inclination):
     Inclination change only requires a normal burn (preferrably at an
     ascending or descending node)
     """
-    logger.info(f"Changing orbit inclination to {inclination} degrees")
+    logger.info("Changing orbit inclination to %s degrees", inclination)
 
     (an_time, dn_time) = utils.time_ascending_descending_nodes(delta_time=False)
     # Which node do we want
@@ -264,25 +206,28 @@ def inclination_change(inclination):
 
 show_features()
 do_prelaunch()
-countdown(5)
+utils.countdown(5)
 do_launch()
 do_ascent(TARGET_ALTITUDE, TARGET_INCLINATION)
 do_coast(TARGET_ALTITUDE)
-do_circularisation()
+utils.jettison_fairings()
+time.sleep(2)
+utils.extend_solar_panels()
+circularise.do_circularisation(FEATURES["USE_SAS"])
 
 logger.info("Launch complete")
 
 # Wait for the orbit to settle
-time.sleep(2)
-show_orbit()
+# time.sleep(2)
+# show_orbit()
 
-while True:
-    print(
-        f"Inclination = {math.degrees(vessel.orbit.inclination)}({vessel.orbit.inclination})"
-    )
-    time.sleep(5)
+# while True:
+#     print(
+#         f"Inclination = {math.degrees(vessel.orbit.inclination)}({vessel.orbit.inclination})"
+#     )
+#     time.sleep(5)
 
 
-inclination_change(-5)
+# inclination_change(-5)
 
 logger.info("PROGRAM ENDED")

@@ -1,13 +1,13 @@
-#
-# Class of useful utility functions
-#
+"""
+Class of useful utility functions
+"""
 import logging
 import math
 import time
 
 import krpc
 
-from decorators import singleton, log_as
+from decorators import singleton
 from vector import Vector
 
 logger = logging.getLogger(__name__)
@@ -19,12 +19,15 @@ SECONDS_PER_DEGREE = 60
 
 
 @singleton
-class kRPC_Utilities(object):
+class KrpcUtilities(object):
+    """Some useful utility functions"""
+
     def __init__(self, connection):
         self.conn = connection
         self.ksc = self.conn.space_center  # pylint: disable=no-member
         self.vessel = self.ksc.active_vessel
-        self.SASMode = self.ksc.SASMode
+        self.sas_mode = self.ksc.SASMode
+        self.available_thrust = 0
 
     def auto_stage(self):
         """Stage engines when thrust drops"""
@@ -37,6 +40,17 @@ class kRPC_Utilities(object):
                 if self.vessel.available_thrust > 0:
                     break
             self.available_thrust = self.vessel.available_thrust - 10
+
+    def jettison_fairings(self):
+        """Jettison all fairings"""
+        for fairing in self.vessel.parts.fairings:
+            fairing.jettison()
+
+    def extend_solar_panels(self):
+        """Extend all solar panels"""
+        for solar_panel in self.vessel.parts.solar_panels:
+            if solar_panel.deployable:
+                solar_panel.deployed = True
 
     def wait_until_time(self, ut_time, use_warp=True):
         """Wait until it is specified absolute time
@@ -53,23 +67,25 @@ class kRPC_Utilities(object):
             pass
 
     def set_sas_mode(self, new_mode):
-        """Set an SAS mode, if all goes well returns True, if any exception is thrown then return False"""
+        """Set an SAS mode, if all goes well returns True,
+        if any exception is thrown then return False"""
         try:
             self.vessel.control.sas = True
             time.sleep(0.1)
             self.vessel.control.sas_mode = new_mode
             return True
-        except:
+        except:  # pylint: disable=bare-except
             return False
 
     def calculate_burn_time(self, node):
+        """Calculate burn time for a node"""
         # Calculate burn time (using rocket equation)
-        f = self.vessel.available_thrust
+        force = self.vessel.available_thrust
         isp = self.vessel.specific_impulse * G0
-        m0 = self.vessel.mass
-        m1 = m0 / math.exp(node.delta_v / isp)
-        flow_rate = f / isp
-        return (m0 - m1) / flow_rate
+        m0_ = self.vessel.mass
+        m1_ = m0_ / math.exp(node.delta_v / isp)
+        flow_rate = force / isp
+        return (m0_ - m1_) / flow_rate
 
     def align_with_node(self, node, use_sas):
         """Align the ship with the burn vector of the node
@@ -80,16 +96,16 @@ class kRPC_Utilities(object):
         logger.info("Orientating ship for burn")
         if use_sas:
             self.vessel.auto_pilot.disengage()
-            if self.set_sas_mode(self.SASMode.maneuver):
+            if self.set_sas_mode(self.sas_mode.maneuver):
                 logger.info("Using SAS")
                 pointing_at_node = False
-                n = Vector(0, 1, 0)
+                normal = Vector(0, 1, 0)
                 with self.conn.stream(
                     getattr, self.vessel.flight(node.reference_frame), "direction"
                 ) as facing:
                     while not pointing_at_node:
-                        d = Vector(facing())
-                        if d.angle(n) < 2:
+                        direction = Vector(facing())
+                        if direction.angle(normal) < 2:
                             pointing_at_node = True
                         time.sleep(0.1)
                 logger.info("Returning to Auto Pilot")
@@ -111,16 +127,16 @@ class kRPC_Utilities(object):
         logger.info("Executing burn")
 
         with self.conn.stream(getattr, node, "remaining_delta_v") as remaining_delta_v:
-            dv = remaining_delta_v()
-            last_dv = dv
-            while dv > 0.01:
+            dv_ = remaining_delta_v()
+            last_dv = dv_
+            while dv_ > 0.01:
                 self.auto_stage()
                 engine_dv = self.vessel.available_thrust / self.vessel.mass
                 if engine_dv > 0:
-                    self.vessel.control.throttle = max(min((dv / engine_dv), 1), 0.01)
-                last_dv = dv
-                dv = remaining_delta_v()
-                if dv > last_dv + 0.01:
+                    self.vessel.control.throttle = max(min((dv_ / engine_dv), 1), 0.01)
+                last_dv = dv_
+                dv_ = remaining_delta_v()
+                if dv_ > last_dv + 0.01:
                     break
         self.vessel.control.throttle = 0.0
 
@@ -158,17 +174,18 @@ class kRPC_Utilities(object):
         """Calculate time to/of ascending and descending nodes
 
         Parameters:
-        `delta_time`: Boolean if True a time until is returned, if False the an absolute time is returned
+        `delta_time`: Boolean if True a time until is returned,
+                      if False the an absolute time is returned
         Returns:
         Tuple containing (Time to Ascending Node, Time To Descending Node)
         """
         # Argument of periapsis is angle from ascending node to periapsis
-        ap = self.vessel.orbit.argument_of_periapsis
+        ap_ = self.vessel.orbit.argument_of_periapsis
         tau = math.pi * 2
         period = self.vessel.orbit.period
 
         # Convert to angle FROM periapsis to AN
-        peri_to_an = tau - ap
+        peri_to_an = tau - ap_
         # DN is opposite AN
         peri_to_dn = (
             peri_to_an - math.pi if peri_to_an >= math.pi else peri_to_an + math.pi
@@ -228,7 +245,7 @@ class kRPC_Utilities(object):
     #    return brot.
     #  }
 
-    def launch_heading(self, inclination, orbitAltitude):
+    def launch_heading(self, inclination, orbit_altitude):
         """Calculate the launch heading to achive a desired orbital inclination
 
         Parameters:
@@ -236,10 +253,12 @@ class kRPC_Utilities(object):
         `orbitAltitude`: Height in metres above the surface of the desired orbit
         """
 
-        logger.debug(f"Requested Inclination {inclination}, altitude {orbitAltitude}")
+        logger.debug(
+            "Requested Inclination %s, altitude %s", inclination, orbit_altitude
+        )
         # Make an absolute inclination (0 = East, 90 = North)
         abs_inclination = self.limit_absolute_angle(inclination)
-        # Account for launch site latitude, the inclination must be less than the laucnh
+        # Account for launch site latitude, the inclination must be less than the launch
         # site latitude
         site_latitude = self.vessel.flight().latitude
         # Convert so 0 is east
@@ -256,12 +275,12 @@ class kRPC_Utilities(object):
             else:
                 launch_angle = 270
 
-        logger.debug(f"Launch Angle {launch_angle}")
+        logger.debug("Launch Angle %s", launch_angle)
 
-        mu = self.ksc.g * self.vessel.orbit.body.mass
+        mu_ = self.ksc.g * self.vessel.orbit.body.mass
         body_radius = self.vessel.orbit.body.equatorial_radius
-        orbit_from_centre = body_radius + orbitAltitude
-        v_orbit = math.sqrt(mu / orbit_from_centre)
+        orbit_from_centre = body_radius + orbit_altitude
+        v_orbit = math.sqrt(mu_ / orbit_from_centre)
         v_equator = (
             2 * math.pi * body_radius
         ) / self.vessel.orbit.body.rotational_period
@@ -272,17 +291,48 @@ class kRPC_Utilities(object):
         b_rot = math.degrees(math.atan(v_x / v_y))
         if abs_inclination >= 180:
             b_rot = 180 + b_rot
+        logger.debug("Launch Heading %s", b_rot)
+
+        #    local vorbit is sqrt(ship:body:mu/(ship:body:radius + orbitAltitude)).
+        #    local veqrot is (2 * constant:PI * ship:body:radius) / ship:body:rotationperiod.
+        #    local vxrot is vorbit * sin(binertial) - veqrot * cos(ship:latitude).
+        #    local vyrot is vorbit * cos(binertial).
+        #    local brot is arctan(vxrot/vyrot).
+        #    if inclination >= 180 set brot to 180 + brot.
+        #    return brot.
 
         return b_rot
 
+    def countdown(self, seconds):
+        """Display a simple countdown to launch
 
-#    local vorbit is sqrt(ship:body:mu/(ship:body:radius + orbitAltitude)).
-#    local veqrot is (2 * constant:PI * ship:body:radius) / ship:body:rotationperiod.
-#    local vxrot is vorbit * sin(binertial) - veqrot * cos(ship:latitude).
-#    local vyrot is vorbit * cos(binertial).
-#    local brot is arctan(vxrot/vyrot).
-#    if inclination >= 180 set brot to 180 + brot.
-#    return brot.
+        Parameters:
+        `seconds`: the number of ticks in the countdown
+        """
+        for tick in range(seconds, 0, -1):
+            logger.info("%s...", tick)
+            tick.sleep(1)
+        logger.info("Launch!")
+
+    def convert_time(self, seconds):
+        """Convert a number of seconds to days:hours:minutes:seconds string"""
+        mins, secs = divmod(seconds, 60)
+        hours, mins = divmod(mins, 60)
+        days, hours = divmod(hours, 6)
+        return f"{int(days)}:{int(hours):02}:{int(mins):02}:{secs:02.2f}"
+
+    def show_orbit(self):
+        """Show current orbit parameters"""
+        orbit = self.vessel.orbit
+        string = ""
+        string += f"\nOrbiting {orbit.body.name}"
+        string += f"\nApoapsis = {orbit.apoapsis_altitude}"
+        string += f"\nPeriapsis = {orbit.periapsis_altitude}"
+        string += f"\nEccentricty = {orbit.eccentricity}"
+        string += f"\nInclination = {math.degrees(orbit.inclination)}"
+        string += f"\nPeriod = {self.convert_time(orbit.period)}"
+
+        logger.info(string)
 
 
 if __name__ == "__main__":
@@ -292,7 +342,7 @@ if __name__ == "__main__":
 
     conn = krpc.connect(name="Test Code")
     # Create the utility package
-    utils = kRPC_Utilities(conn)
+    utils = KrpcUtilities(conn)
     for inc in range(0, 360, 30):
         head = utils.launch_heading(inc, 100000)
-        logger.info(f"Data: {inc}, {head}")
+        logger.info("Data: %s, %s", inc, head)
