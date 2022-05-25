@@ -12,9 +12,16 @@ print("Got vessel")
 
 print(f"{vessel.name}")
 
-
 utils = krpcutils.KrpcUtilities(conn)
 
 utils.jettison_fairings()
 time.sleep(1)
 utils.extend_solar_panels()
+
+
+for part in vessel.parts.all:
+    print(part.name)
+    for module in part.modules:
+        print(f"  {module.name}")
+        for event in module.events:
+            print(f"    {event}")
