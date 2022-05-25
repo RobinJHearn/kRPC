@@ -7,7 +7,7 @@ import krpcutils
 
 from decorators import singleton
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("KSP")
 
 
 @singleton

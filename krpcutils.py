@@ -1,16 +1,15 @@
 """
 Class of useful utility functions
 """
+
 import logging
 import math
 import time
 
 import krpc
 
-from decorators import singleton
+from decorators import singleton, log_debug
 from vector import Vector
-
-logger = logging.getLogger(__name__)
 
 # Universal Constants
 G0 = 9.80665
@@ -26,20 +25,27 @@ class KrpcUtilities(object):
         self.conn = connection
         self.ksc = self.conn.space_center  # pylint: disable=no-member
         self.vessel = self.ksc.active_vessel
+        self.logger = logging.getLogger("KSP")
         self.sas_mode = self.ksc.SASMode
-        self.available_thrust = 0
+        self.available_thrust = -100
 
+    #    @log_debug(logging.getLogger("KSP"))
     def auto_stage(self):
         """Stage engines when thrust drops"""
-        if not hasattr(self, "available_thrust"):
+        if self.available_thrust < -10:
             self.available_thrust = self.vessel.available_thrust - 10
+        self.logger.debug(
+            "Avaiable Thrust: %s, Last Value: %s",
+            self.vessel.available_thrust,
+            self.available_thrust,
+        )
         if self.vessel.available_thrust < self.available_thrust:
             while True:
                 self.vessel.control.activate_next_stage()
-                logger.info("Staging")
+                self.logger.info("Staging")
                 if self.vessel.available_thrust > 0:
+                    self.available_thrust = self.vessel.available_thrust - 10
                     break
-            self.available_thrust = self.vessel.available_thrust - 10
 
     def jettison_fairings(self):
         """Jettison all fairings"""
@@ -52,13 +58,19 @@ class KrpcUtilities(object):
             if solar_panel.deployable:
                 solar_panel.deployed = True
 
+    def extend_antennas(self):
+        """Extend all antennas"""
+        for antenna in self.vessel.parts.antennas:
+            if antenna.deployable:
+                antenna.deployed = True
+
     def wait_until_time(self, ut_time, use_warp=True):
         """Wait until it is specified absolute time
 
         Parameters:
         `ut_time`: Absolute universal time in seconds to wait until
         """
-        logger.info("Waiting until time")
+        self.logger.info("Waiting until time")
         if use_warp:
             lead_time = 5
             self.ksc.warp_to(ut_time - lead_time)
@@ -75,6 +87,7 @@ class KrpcUtilities(object):
             self.vessel.control.sas_mode = new_mode
             return True
         except:  # pylint: disable=bare-except
+            self.vessel.control.sas = False
             return False
 
     def calculate_burn_time(self, node):
@@ -93,11 +106,11 @@ class KrpcUtilities(object):
         Parameters:
         `node`: The node to align with
         """
-        logger.info("Orientating ship for burn")
+        self.logger.info("Orientating ship for burn")
         if use_sas:
             self.vessel.auto_pilot.disengage()
             if self.set_sas_mode(self.sas_mode.maneuver):
-                logger.info("Using SAS")
+                self.logger.info("Using SAS")
                 pointing_at_node = False
                 normal = Vector(0, 1, 0)
                 with self.conn.stream(
@@ -108,15 +121,20 @@ class KrpcUtilities(object):
                         if direction.angle(normal) < 2:
                             pointing_at_node = True
                         time.sleep(0.1)
-                logger.info("Returning to Auto Pilot")
+                self.logger.info("Returning to Auto Pilot")
             else:
-                logger.info("Using auto pilot")
+                self.logger.info("Using auto pilot")
 
-        self.vessel.auto_pilot.sas = False
-        self.vessel.auto_pilot.reference_frame = node.reference_frame
-        self.vessel.auto_pilot.target_direction = (0, 1, 0)
-        self.vessel.auto_pilot.engage()
-        self.vessel.auto_pilot.wait()
+        error = 100
+        while math.fabs(error) > 2:
+            self.vessel.control.sas = False
+            self.vessel.auto_pilot.sas = False
+            self.vessel.auto_pilot.reference_frame = node.reference_frame
+            self.vessel.auto_pilot.target_direction = (0, 1, 0)
+            self.vessel.auto_pilot.engage()
+            self.vessel.auto_pilot.wait()
+            error = self.vessel.auto_pilot.error
+            self.logger.info("Error: %s", error)
 
     def execute_burn(self, node):
         """Execute the burn defined by the node, assume the craft is already aligned for the burn
@@ -124,7 +142,7 @@ class KrpcUtilities(object):
         Parameters:
         `node`: Node defining the deltaV needed for the burn
         """
-        logger.info("Executing burn")
+        self.logger.info("Executing burn")
 
         with self.conn.stream(getattr, node, "remaining_delta_v") as remaining_delta_v:
             dv_ = remaining_delta_v()
@@ -152,7 +170,7 @@ class KrpcUtilities(object):
 
             node.remove()
         else:
-            logger.error("execute_next_node: No Node to execute")
+            self.logger.error("execute_next_node: No Node to execute")
 
     def add_node(self, data):
         """Add a node and return it based on the data list
@@ -253,7 +271,7 @@ class KrpcUtilities(object):
         `orbitAltitude`: Height in metres above the surface of the desired orbit
         """
 
-        logger.debug(
+        self.logger.debug(
             "Requested Inclination %s, altitude %s", inclination, orbit_altitude
         )
         # Make an absolute inclination (0 = East, 90 = North)
@@ -275,7 +293,7 @@ class KrpcUtilities(object):
             else:
                 launch_angle = 270
 
-        logger.debug("Launch Angle %s", launch_angle)
+        self.logger.debug("Launch Angle %s", launch_angle)
 
         mu_ = self.ksc.g * self.vessel.orbit.body.mass
         body_radius = self.vessel.orbit.body.equatorial_radius
@@ -291,15 +309,7 @@ class KrpcUtilities(object):
         b_rot = math.degrees(math.atan(v_x / v_y))
         if abs_inclination >= 180:
             b_rot = 180 + b_rot
-        logger.debug("Launch Heading %s", b_rot)
-
-        #    local vorbit is sqrt(ship:body:mu/(ship:body:radius + orbitAltitude)).
-        #    local veqrot is (2 * constant:PI * ship:body:radius) / ship:body:rotationperiod.
-        #    local vxrot is vorbit * sin(binertial) - veqrot * cos(ship:latitude).
-        #    local vyrot is vorbit * cos(binertial).
-        #    local brot is arctan(vxrot/vyrot).
-        #    if inclination >= 180 set brot to 180 + brot.
-        #    return brot.
+        self.logger.debug("Launch Heading %s", b_rot)
 
         return b_rot
 
@@ -310,9 +320,9 @@ class KrpcUtilities(object):
         `seconds`: the number of ticks in the countdown
         """
         for tick in range(seconds, 0, -1):
-            logger.info("%s...", tick)
-            tick.sleep(1)
-        logger.info("Launch!")
+            self.logger.info("%s...", tick)
+            time.sleep(1)
+        self.logger.info("Launch!")
 
     def convert_time(self, seconds):
         """Convert a number of seconds to days:hours:minutes:seconds string"""
@@ -332,17 +342,40 @@ class KrpcUtilities(object):
         string += f"\nInclination = {math.degrees(orbit.inclination)}"
         string += f"\nPeriod = {self.convert_time(orbit.period)}"
 
-        logger.info(string)
+        self.logger.info(string)
+
+    def wait_for_LAN(self, target_lan):
+        self.logger.info("Waiting for LAN of %s", target_lan)
+
+        fudge = 0.68
+        current_longitude = math.degrees(self.vessel.orbit.longitude_of_ascending_node)
+        delta_angle = self.limit_absolute_angle(
+            -current_longitude + target_lan - fudge + 360
+        )
+        time_to_wait = delta_angle * SECONDS_PER_DEGREE
+        self.logger.info(
+            "Target: %s, Current: %s, Delat: %s, Time: %s",
+            target_lan,
+            current_longitude,
+            delta_angle,
+            time_to_wait,
+        )
+        self.ksc.warp_to(self.ksc.ut + time_to_wait)
+        self.logger.info(
+            "Now at %s", math.degrees(self.vessel.orbit.longitude_of_ascending_node)
+        )
 
 
 if __name__ == "__main__":
     logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
-    logger = logging.getLogger(__name__)
+    logger = logging.getLogger("KSP")
     logger.setLevel(logging.DEBUG)
 
     conn = krpc.connect(name="Test Code")
     # Create the utility package
     utils = KrpcUtilities(conn)
-    for inc in range(0, 360, 30):
-        head = utils.launch_heading(inc, 100000)
-        logger.info("Data: %s, %s", inc, head)
+
+    utils.jettison_fairings()
+    time.sleep(2)
+    utils.extend_solar_panels()
+    utils.extend_antennas()

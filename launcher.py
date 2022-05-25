@@ -18,11 +18,17 @@ FEATURES = {
     "USE_SAS": True,  # Use SAS to point for maneuver
     "PERFORM_ASCENT_ROLL": True,  # Roll rocket on launch ala NASA
     "SHOW_LOG_IN_KSP": False,  # Show log in a window in KSP
+    "TEST_AT": False,  # Implement a straight up test of a component at alt/speed
+    "AT_LAN": False,  # Launch at the specified LAN
 }
 
 # Launch parameters
-TARGET_ALTITUDE = 100_000
+TARGET_ALTITUDE = 80_000
 TARGET_INCLINATION = 0
+TARGET_LAN = 56.7
+
+TEST_ALTITUDE = 41_000
+TEST_SPEED = 480
 
 # Configure connection to KSP and some short cuts
 conn = krpc.connect(name="Launch into orbit")
@@ -30,18 +36,18 @@ ksc = conn.space_center  # pylint: disable=no-member
 vessel = ksc.active_vessel
 SASMode = ksc.SASMode
 
-# Create the utility package
-utils = krpcutils.KrpcUtilities(conn)
-circularise = circularise.Circularise(conn)
-
 # Configure logging
 logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("KSP")
 logger.setLevel(logging.INFO)
 if FEATURES["SHOW_LOG_IN_KSP"]:
     ksp_stream = krpclogstream.KrpcLogStream(conn)
     handler = logging.StreamHandler(ksp_stream)
     logger.addHandler(handler)
+
+# Create the utility package
+utils = krpcutils.KrpcUtilities(conn)
+circularise = circularise.Circularise(conn)
 
 
 def show_features():
@@ -195,7 +201,28 @@ def inclination_change(inclination):
     utils.add_node([node_time, 0, 0, data])
 
 
-#    utils.execute_next_node(FEATURES["USE_SAS"])
+def do_test(test_altitude, test_speed):
+    """Test a component at an altitude/speed"""
+
+    logger.info("Target Alt: %s, Target Speed: %s", test_altitude, test_speed)
+    srf_frame = vessel.orbit.body.reference_frame
+
+    with conn.stream(
+        getattr, vessel.flight(), "mean_altitude"
+    ) as altitude, conn.stream(getattr, vessel.flight(srf_frame), "speed") as speed:
+        while altitude() < test_altitude:
+            logger.info("Altitude: %s, Speed: %s", altitude(), speed())
+            if speed() > 1.1 * test_speed:
+                vessel.control.throttle = 0.0
+            if speed() < 0.9 * test_speed:
+                vessel.control.throttle = 1.0
+            time.sleep(1.0)
+
+        # Run the test
+        for part in vessel.parts.all:
+            for module in part.modules:
+                if module.has_event("Run Test"):
+                    module.trigger_event("Run Test")
 
 
 ###################################################
@@ -208,26 +235,17 @@ show_features()
 do_prelaunch()
 utils.countdown(5)
 do_launch()
-do_ascent(TARGET_ALTITUDE, TARGET_INCLINATION)
-do_coast(TARGET_ALTITUDE)
-utils.jettison_fairings()
-time.sleep(2)
-utils.extend_solar_panels()
-circularise.do_circularisation(FEATURES["USE_SAS"])
+if FEATURES["TEST_AT"]:
+    do_test(TEST_ALTITUDE, TEST_SPEED)
+else:
+    do_ascent(TARGET_ALTITUDE, TARGET_INCLINATION)
+    do_coast(TARGET_ALTITUDE)
+    utils.jettison_fairings()
+    time.sleep(5)
+    utils.extend_solar_panels()
+    utils.extend_antennas()
+    circularise.do_circularisation(FEATURES["USE_SAS"])
 
 logger.info("Launch complete")
-
-# Wait for the orbit to settle
-# time.sleep(2)
-# show_orbit()
-
-# while True:
-#     print(
-#         f"Inclination = {math.degrees(vessel.orbit.inclination)}({vessel.orbit.inclination})"
-#     )
-#     time.sleep(5)
-
-
-# inclination_change(-5)
 
 logger.info("PROGRAM ENDED")
