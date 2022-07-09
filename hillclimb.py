@@ -3,12 +3,9 @@
 import logging
 import math
 
-import decorators
-
 logger = logging.getLogger(__name__)
 
 
-@decorators.log_debug(logger)
 def hill_climb(data, score_function):
     """Modify the list of data and use the score_function to improve it
 
@@ -24,12 +21,6 @@ def hill_climb(data, score_function):
         while improved:
             # Create a list of candidate data lists with each elements adjusted by +/-step
             candidates = []
-            # for c in range(0, len(data)):
-            #     inc = current_best.copy()
-            #     dec = current_best.copy()
-            #     inc[c] += step
-            #     dec[c] -= step
-            #     candidates += [inc, dec]
             for current in range(1, int(math.pow(2, len(data)))):
                 inc = current_best.copy()
                 dec = current_best.copy()

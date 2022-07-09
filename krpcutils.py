@@ -7,9 +7,11 @@ import math
 import time
 
 import krpc
+import pid
 
-from decorators import singleton, log_debug
+from decorators import log_debug
 from vector import Vector
+from hillclimb import hill_climb
 
 # Universal Constants
 G0 = 9.80665
@@ -17,17 +19,130 @@ HOURS_PER_DAY = 6
 SECONDS_PER_DEGREE = 60
 
 
-@singleton
 class KrpcUtilities(object):
     """Some useful utility functions"""
 
-    def __init__(self, connection):
+    def __init__(self, logger, connection):
         self.conn = connection
         self.ksc = self.conn.space_center  # pylint: disable=no-member
         self.vessel = self.ksc.active_vessel
-        self.logger = logging.getLogger("KSP")
+        self.logger = logger
         self.sas_mode = self.ksc.SASMode
         self.available_thrust = -100
+
+    def do_prelaunch(self):
+        """Pre-launch setup"""
+        self.vessel.control.sas = True
+        self.vessel.control.sas_mode = self.sas_mode.stability_assist
+        self.vessel.control.rcs = False
+        self.vessel.control.throttle = 1.0
+
+    def do_launch(self):
+        """Launch the rocket pointing straight up"""
+
+        # Activate the first stage
+        self.vessel.auto_pilot.engage()
+        self.vessel.auto_pilot.target_pitch_and_heading(90, 90)
+        # Stage until the rocket gets some thrust
+        while self.vessel.thrust < 10:
+            self.vessel.control.activate_next_stage()
+            time.sleep(1)
+
+    def do_ascent(
+        self,
+        target_altitude=100_000,
+        target_inclination=0,
+        perform_roll=False,
+        full_burn=False,
+    ):
+        """Perform an ascent, pitching over as the rocket climbs.
+
+        Parameters:
+        `target_altitude`: the target altituide to reach
+        `target_heading`: the heading to use when ascending
+        """
+        self.logger.info(
+            "Ascending to apoapsis %s on heading %s",
+            target_altitude,
+            target_inclination,
+        )
+
+        # Set the initial parameters, heading, pitch and roll
+        heading = self.launch_heading(target_inclination, target_altitude)
+        self.logger.info("Target heading %s", heading)
+        self.vessel.auto_pilot.target_heading = heading
+        self.vessel.auto_pilot.target_pitch = 90
+        if perform_roll:
+            self.vessel.auto_pilot.target_roll = 0
+        else:
+            self.vessel.auto_pilot.target_roll = 90
+
+        with self.conn.stream(
+            getattr, self.vessel.orbit, "apoapsis_altitude"
+        ) as apoapsis, self.conn.stream(
+            getattr, self.vessel.flight(), "surface_altitude"
+        ) as altitude, self.conn.stream(
+            getattr, self.vessel.orbit, "time_to_apoapsis"
+        ) as time_to_apoapsis:
+
+            while apoapsis() < target_altitude * 0.95:
+
+                # Get rid of any used stages
+                self.auto_stage()
+
+                # Adjust the pitch
+                self.vessel.auto_pilot.target_pitch = max(
+                    88.963 - 1.03287 * altitude() ** 0.409511, 0
+                )
+
+                self.logger.debug(
+                    "Current Heading %s", self.vessel.auto_pilot.target_heading
+                )
+
+                if not full_burn:
+                    # Apply a simple change to thrust based on time to apoapsis
+                    if time_to_apoapsis() < 60:
+                        self.vessel.control.throttle = 1.0
+                    if time_to_apoapsis() > 65 and time_to_apoapsis() < 120:
+                        self.vessel.control.throttle = 0.5
+                    if time_to_apoapsis() > 125:
+                        self.vessel.control.throttle = 0.25
+
+            self.vessel.control.throttle = 0.1
+            while apoapsis() < target_altitude:
+                pass
+
+        self.logger.info("Target apoapsis reached")
+        self.vessel.control.throttle = 0.0
+
+    def do_coast(self, target_altitude):
+        """Coast until out of the atmosphere, keeping apoapsis at `altitude`
+
+        Parameters:
+        `altitude`: the target altitude to hold
+        """
+        self.logger.info(
+            "Coasting out of atmosphere to apoapsis of %s", target_altitude
+        )
+
+        self.vessel.auto_pilot.target_pitch = 0
+
+        coast_pid = pid.PID(P=0.3, I=0, D=0)
+        coast_pid.setpoint(target_altitude)
+
+        # Until we exit the planets atmosphere
+        atmosphere_depth = self.vessel.orbit.body.atmosphere_depth
+        with self.conn.stream(
+            getattr, self.vessel.flight(), "mean_altitude"
+        ) as altitude, self.conn.stream(
+            getattr, self.vessel.orbit, "apoapsis_altitude"
+        ) as apoapsis:
+            while altitude() < atmosphere_depth:
+                self.vessel.control.throttle = self.limit(
+                    self.vessel.control.throttle + coast_pid.update(apoapsis())
+                )
+                self.auto_stage()
+                time.sleep(0.1)
 
     #    @log_debug(logging.getLogger("KSP"))
     def auto_stage(self):
@@ -344,36 +459,127 @@ class KrpcUtilities(object):
 
         self.logger.info(string)
 
-    def wait_for_LAN(self, target_lan):
-        self.logger.info("Waiting for LAN of %s", target_lan)
+    def wait_for_LAN(self, target_lan):  # pylint: disable=invalid-name
+        """Wait to launch at a specific LAN
+        The body.rotation_angle is the LAN that would occur if the
+        launch was from 0 longitude.
 
-        fudge = 0.68
-        current_longitude = math.degrees(self.vessel.orbit.longitude_of_ascending_node)
-        delta_angle = self.limit_absolute_angle(
-            -current_longitude + target_lan - fudge + 360
-        )
-        time_to_wait = delta_angle * SECONDS_PER_DEGREE
-        self.logger.info(
-            "Target: %s, Current: %s, Delat: %s, Time: %s",
-            target_lan,
-            current_longitude,
-            delta_angle,
-            time_to_wait,
-        )
-        self.ksc.warp_to(self.ksc.ut + time_to_wait)
-        self.logger.info(
-            "Now at %s", math.degrees(self.vessel.orbit.longitude_of_ascending_node)
-        )
+        The target rotation angle to launch at is
+            target_lan - launch site longitude
+        Subtract the current rotation angle gives teh number of
+        degrees between 'now' and 'then' so convert to time by
+        multiplying by 60 (360 degress = 6 hours, so 1 degree per minute)
+
+        Launching at this time will produce a LAN near to what is requested but
+        will overshoot as the rocket is thrown east on launch by the rotation
+        of the planet.
+
+        """
+
+        if target_lan:
+            self.logger.info("Waiting for LAN of %s", target_lan)
+
+            target_rotation_angle = self.limit_absolute_angle(
+                target_lan - self.vessel.flight().longitude
+            )
+            delta_angle = target_rotation_angle - math.degrees(
+                self.vessel.orbit.body.rotation_angle
+            )
+            time_to_wait = delta_angle * SECONDS_PER_DEGREE
+            self.logger.info(
+                "Target: %s, Rotation: %s, Delta: %s, Time: %s",
+                target_lan,
+                target_rotation_angle,
+                delta_angle,
+                time_to_wait,
+            )
+            self.ksc.warp_to(self.ksc.ut + time_to_wait - 30)
+
+            # Wait to get closer to the required LAN
+            with self.conn.stream(
+                getattr, self.vessel.orbit.body, "rotation_angle"
+            ) as angle:
+                delta = math.degrees(target_rotation_angle - angle())
+                while delta > 0 and delta < -1:
+                    time.sleep(1.0)
+
+            self.logger.info(
+                "Angle: %s", math.degrees(self.vessel.orbit.body.rotation_angle)
+            )
+
+    def do_test(self, test_altitude, test_speed):
+        """Test a component at an altitude/speed"""
+
+        logger.info("Target Alt: %s, Target Speed: %s", test_altitude, test_speed)
+        srf_frame = self.vessel.orbit.body.reference_frame
+
+        with conn.stream(
+            getattr, self.vessel.flight(), "mean_altitude"
+        ) as altitude, conn.stream(
+            getattr, self.vessel.flight(srf_frame), "speed"
+        ) as speed:
+            while altitude() < test_altitude:
+                logger.info("Altitude: %s, Speed: %s", altitude(), speed())
+                if speed() > 1.1 * test_speed:
+                    self.vessel.control.throttle = 0.0
+                if speed() < 0.9 * test_speed:
+                    self.vessel.control.throttle = 1.0
+                time.sleep(1.0)
+
+            # Run the test
+            for part in self.vessel.parts.all:
+                for module in part.modules:
+                    if module.has_event("Run Test"):
+                        module.trigger_event("Run Test")
+
+    def score_inclination(self, target_inclination, target_time):
+        """Wrapper to set a target inclination value"""
+
+        @log_debug(logger)
+        def score_function(data):
+            """Scoring function for inclination changes
+
+            Parameters:
+            `data`: list of three items representing prograde, radial and normal burns
+            """
+            node = self.add_node([target_time, 0, 0, data[0]])
+            inclination = math.degrees(node.orbit.inclination)
+            logger.debug("target inc: %s node.inc: %s", target_inclination, inclination)
+            score = abs(target_inclination - inclination)
+            node.remove()
+            return score
+
+        return score_function
+
+    def inclination_change(self, inclination):
+        """Change inclination of orbit
+
+        Inclination change only requires a normal burn (preferrably at an
+        ascending or descending node)
+        """
+        logger.info("Changing orbit inclination to %s degrees", inclination)
+
+        (an_time, dn_time) = self.time_ascending_descending_nodes(delta_time=False)
+        # Which node do we want
+        if inclination > math.degrees(self.vessel.orbit.inclination):
+            # Going down so descending node
+            node_time = dn_time
+        else:
+            node_time = an_time
+
+        score_function = self.score_inclination(inclination, node_time)
+        data = hill_climb([0], score_function)[0]
+        self.add_node([node_time, 0, 0, data])
 
 
 if __name__ == "__main__":
     logging.basicConfig(format="%(asctime)-15s %(levelname)s %(message)s")
-    logger = logging.getLogger("KSP")
-    logger.setLevel(logging.DEBUG)
+    my_logger = logging.getLogger("KSP")
+    my_logger.setLevel(logging.DEBUG)
 
     conn = krpc.connect(name="Test Code")
     # Create the utility package
-    utils = KrpcUtilities(conn)
+    utils = KrpcUtilities(my_logger, conn)
 
     utils.jettison_fairings()
     time.sleep(2)

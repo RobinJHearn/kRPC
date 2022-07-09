@@ -1,24 +1,15 @@
 """Class to circulise an orbit"""
 
-import logging
 from hillclimb import hill_climb
-import krpcutils
 
 
-from decorators import singleton
-
-logger = logging.getLogger("KSP")
-
-
-@singleton
 class Circularise(object):
     """Circularise an orbit"""
 
-    def __init__(self, connection):
+    def __init__(self, connection, utils, logger):
         self.conn = connection
-        self.ksc = self.conn.space_center  # pylint: disable=no-member
-        self.vessel = self.ksc.active_vessel
-        self.utils = krpcutils.KrpcUtilities(self.conn)
+        self.utils = utils
+        self.logger = logger
 
     def score_eccenticity(self, data):
         """Score function for the hill climb to circularise an orbit
@@ -28,11 +19,16 @@ class Circularise(object):
         Parameters:
         `data`: list with single item - prograde deltaV burn
         """
-        node = self.utils.add_node(
-            [self.ksc.ut + self.vessel.orbit.time_to_apoapsis, data[0]]
-        )
-        score = node.orbit.eccentricity
-        node.remove()
+        vessel = self.conn.vessel()
+        if vessel:
+            node = self.utils.add_node(
+                [
+                    self.conn.space_center().ut + vessel.orbit.time_to_apoapsis,
+                    data[0],
+                ]
+            )
+            score = node.orbit.eccentricity
+            node.remove()
         return score
 
     def do_circularisation(self, use_sas):
@@ -42,8 +38,16 @@ class Circularise(object):
         Parameters:
         `use_sas`: Boolean to indicate if SAS should be used to align to node
         """
-        logger.info("Circularising orbit")
+        self.logger.info("Circularising orbit")
 
-        delta_v = hill_climb([0], self.score_eccenticity)[0]
-        self.utils.add_node([self.ksc.ut + self.vessel.orbit.time_to_apoapsis, delta_v])
-        self.utils.execute_next_node(use_sas)
+        if self.conn.vessel():
+            delta_v = hill_climb([0], self.score_eccenticity)[0]
+            self.utils.add_node(
+                [
+                    self.conn.space_center().ut + self.vessel.orbit.time_to_apoapsis,
+                    delta_v,
+                ]
+            )
+            self.utils.execute_next_node(use_sas)
+        else:
+            self.logger.info("No vessel to circularise")
