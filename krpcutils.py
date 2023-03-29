@@ -84,9 +84,7 @@ class KrpcUtilities(object):
         ) as altitude, self.conn.stream(
             getattr, self.vessel.orbit, "time_to_apoapsis"
         ) as time_to_apoapsis:
-
             while apoapsis() < target_altitude * 0.95:
-
                 # Get rid of any used stages
                 self.auto_stage()
 
@@ -510,7 +508,7 @@ class KrpcUtilities(object):
     def do_test(self, test_altitude, test_speed):
         """Test a component at an altitude/speed"""
 
-        logger.info("Target Alt: %s, Target Speed: %s", test_altitude, test_speed)
+        self.logger.info("Target Alt: %s, Target Speed: %s", test_altitude, test_speed)
         srf_frame = self.vessel.orbit.body.reference_frame
 
         with conn.stream(
@@ -519,7 +517,7 @@ class KrpcUtilities(object):
             getattr, self.vessel.flight(srf_frame), "speed"
         ) as speed:
             while altitude() < test_altitude:
-                logger.info("Altitude: %s, Speed: %s", altitude(), speed())
+                self.logger.info("Altitude: %s, Speed: %s", altitude(), speed())
                 if speed() > 1.1 * test_speed:
                     self.vessel.control.throttle = 0.0
                 if speed() < 0.9 * test_speed:
@@ -535,7 +533,7 @@ class KrpcUtilities(object):
     def score_inclination(self, target_inclination, target_time):
         """Wrapper to set a target inclination value"""
 
-        @log_debug(logger)
+        @log_debug(self.logger)
         def score_function(data):
             """Scoring function for inclination changes
 
@@ -544,7 +542,9 @@ class KrpcUtilities(object):
             """
             node = self.add_node([target_time, 0, 0, data[0]])
             inclination = math.degrees(node.orbit.inclination)
-            logger.debug("target inc: %s node.inc: %s", target_inclination, inclination)
+            self.logger.debug(
+                "target inc: %s node.inc: %s", target_inclination, inclination
+            )
             score = abs(target_inclination - inclination)
             node.remove()
             return score
@@ -557,7 +557,7 @@ class KrpcUtilities(object):
         Inclination change only requires a normal burn (preferrably at an
         ascending or descending node)
         """
-        logger.info("Changing orbit inclination to %s degrees", inclination)
+        self.logger.info("Changing orbit inclination to %s degrees", inclination)
 
         (an_time, dn_time) = self.time_ascending_descending_nodes(delta_time=False)
         # Which node do we want
