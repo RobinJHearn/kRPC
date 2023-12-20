@@ -1,18 +1,18 @@
 """Class holding general utility functions"""
 import time
-
 import krpc
 import krpcutils
+from logger import Logger
 
 print("Connecting")
-conn = krpc.connect(name="Hello World")
+conn = krpc.connect(name="Hello World", address="Galileo")  # address="192.168.1.120")
 print("Connected")
 vessel = conn.space_center.active_vessel  # pylint: disable=no-member
 print("Got vessel")
 
 print(f"{vessel.name}")
 
-utils = krpcutils.KrpcUtilities(conn)
+utils = krpcutils.KrpcUtilities(logger=Logger().get(), connection=conn)
 
 utils.jettison_fairings()
 time.sleep(1)
